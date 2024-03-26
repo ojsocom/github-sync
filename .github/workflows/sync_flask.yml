@@ -1,0 +1,23 @@
+name: Sync Flask
+on:
+  schedule:
+    - cron: '0 1 1 * *'
+  workflow_dispatch:
+
+jobs:
+  job1:
+    uses: ./.github/workflows/re_sync_fork_remote.yml
+    with:
+      repo: "flask"
+      branch: "main"
+      event_name: ${{ github.event_name }}
+    secrets: inherit
+    
+  job2:
+    runs-on: ubuntu-latest
+    needs: job1
+    steps:
+      - name: pass or fail
+        run: |
+          echo ${{ needs.job1.outputs.message }}
+          echo ${{ needs.job1.outputs.result }}
