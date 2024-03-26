@@ -1,0 +1,147 @@
+name: Reusable sync fork remote
+on:
+  workflow_call:
+    inputs:
+      owner:
+        default: ${{ github.actor }}
+        type: string
+      repo:
+        required: true
+        type: string
+      branch:
+        default: 'main'
+        type: string
+      event_name:
+        description: 'event_name of caller'
+        default: ""
+        type: string
+    secrets:
+      SSH_PRIVATE_KEY:
+        required: true
+      REMOTE_USER:
+        required: true
+      REMOTE_HOST:
+        required: true
+      REMOTE_PATH:
+        required: true
+      GH_PAT:
+        required: true
+    outputs:
+      message:
+        description: "api response message"
+        value: ${{ jobs.sync_fork_remote.outputs.message }}
+      result:
+        description: "last result"
+        value: ${{ jobs.sync_fork_remote.outputs.result }}
+        
+jobs:
+  sync_fork_remote:
+    runs-on: ubuntu-latest
+    outputs:
+      message: ${{ steps.api_merge_upstream.outputs.message }}
+      result: ${{ env.RESULT }}
+    env:
+      OWNER: ${{ inputs.owner }}
+      REPO: ${{ inputs.repo }}
+      BRANCH: ${{ inputs.branch }}
+      EVENT_NAME: ${{ inputs.event_name }}
+      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+      REMOTE_USER: ${{ secrets.REMOTE_USER }}
+      REMOTE_HOST: ${{ secrets.REMOTE_HOST }}
+      REMOTE_PATH: ${{ secrets.REMOTE_PATH }}
+      GH_PAT: ${{ secrets.GH_PAT }}
+      SSH_OK: 0
+      REMOTE_GIT_OK: 0
+      REMOTE_NEED_PUSH: 0
+      RESULT: ""      
+    steps:
+      - name: set env
+        run: |
+          origin_repository="${OWNER}/${REPO}"
+          echo "ORIGIN_REPOSITORY=$origin_repository" >> "$GITHUB_ENV"          
+          remote_git="${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PATH}/${REPO}.git"
+          echo "REMOTE_GIT=$remote_git" >> "$GITHUB_ENV"
+          if [[ ${EVENT_NAME} == "workflow_dispatch" ]]; then
+            echo "REMOTE_NEED_PUSH=1" >> "$GITHUB_ENV"
+          fi
+      - name: sync fork
+        id: api_merge_upstream
+        run: |
+          response=$( curl -L \
+          -X POST \
+          -H "Accept: application/vnd.github+json" \
+          -H "Authorization: Bearer ${GH_PAT}" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          https://api.github.com/repos/${OWNER}/${REPO}/merge-upstream \
+          -d '{"branch":"'"${BRANCH}"'"}' \
+          )
+          if [[ $response == *"Successfully fetched"* ]]; then
+            echo "REMOTE_NEED_PUSH=1" >> "$GITHUB_ENV"
+            echo "message=Api MergeUpstream Success" >> $GITHUB_OUTPUT
+            echo "RESULT=REMOTE_NEED_PUSH" >> "$GITHUB_ENV"
+          else
+            echo "message=Api MergeUpstream Fail" >> $GITHUB_OUTPUT
+          fi
+      - name: checkout
+        if: env.REMOTE_NEED_PUSH == 1
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.ORIGIN_REPOSITORY }}
+          ref: ${{ env.BRANCH }}
+          fetch-depth: 0
+      - name: setup ssh
+        if: env.REMOTE_NEED_PUSH == 1 && env.SSH_OK == 0
+        continue-on-error: true
+        run: |
+          mkdir -p ~/.ssh
+          echo "${SSH_PRIVATE_KEY}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          echo "StrictHostKeyChecking no" >> ~/.ssh/config
+          ssh -o BatchMode=yes -o ConnectTimeout=5 ${REMOTE_USER}@${REMOTE_HOST} pwd
+          if [ $? -ne 0 ]; then
+            echo "ssh test failed($?)."
+          else
+            echo "SSH_OK=1" >> "$GITHUB_ENV"
+          fi
+      - name: test remote git 
+        if: env.SSH_OK == 1
+        continue-on-error: true
+        run: |
+          git remote add downstream $REMOTE_GIT
+          git ls-remote downstream
+          if [ $? -ne 0 ]; then
+            echo "git ls-remote failed($?)."
+          else
+            echo "REMOTE_GIT_OK=1" >> "$GITHUB_ENV"
+            echo "RESULT=REMOTE_GIT_OK" >> "$GITHUB_ENV"
+          fi
+      - name: test remote git is bare
+        if: env.REMOTE_GIT_OK == 1
+        run: |
+          lines=$(git ls-remote -h downstream | wc -l)
+          if [ $lines -ne 0 ]; then
+            echo "REMOTE_GIT_ISBARE=0" >> "$GITHUB_ENV"
+          else
+            echo "REMOTE_GIT_ISBARE=1" >> "$GITHUB_ENV"
+          fi
+      - name: test downstream is updated if not bare 
+        if: env.REMOTE_GIT_OK == 1 && env.REMOTE_GIT_ISBARE == 0
+        run: |
+          log=$(git log -1 --pretty=format:%at%%%H)
+          echo $log
+          git fetch downstream
+          log2=$(git log -1 --pretty=format:%at%%%H downstream/${BRANCH})
+          echo $log2
+          if [[ $log > $log2 ]]; then
+            echo "RESULT=REMOTE_NEED_PUSH" >> "$GITHUB_ENV"
+          else
+            echo "REMOTE_NEED_PUSH=0" >> "$GITHUB_ENV"
+            echo "RESULT=REMOTE_NOT_NEED_PUSH" >> "$GITHUB_ENV"
+          fi
+      - name: push to downstream
+        if: env.REMOTE_NEED_PUSH == 1 && env.REMOTE_GIT_OK == 1
+        run: |
+          # git fetch --unshallow origin
+          git push downstream $BRANCH
+          echo "RESULT=PUSH_DOWNSTREAM_OK" >> "$GITHUB_ENV"
+          
