@@ -1,0 +1,91 @@
+name: test OnPush Sync Remote
+on:
+#   push:
+#     branches:
+#       - main  
+  workflow_dispatch:
+
+jobs:
+  sync-job:
+    runs-on: ubuntu-latest
+    env:
+      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+      REMOTE_USER: ${{ secrets.REMOTE_USER }}
+      REMOTE_HOST: ${{ secrets.REMOTE_HOST }}
+      REMOTE_PATH: ${{ secrets.REMOTE_GITS_PATH }}
+      SSH_OK: 0
+      REMOTE_GIT_OK: 0
+      REMOTE_NEED_PUSH: 0
+    steps:
+      - name: set env
+        run:  |
+          echo ${{ github.event_name }}          
+          echo ${{ github.actor }}
+          echo ${{ github.ref }}
+          echo ${{ github.ref_name }}
+          echo ${{ github.github_repository }}
+          # branch
+          echo "BRANCH=${{ github.ref_name }}" >> "$GITHUB_ENV"
+          # repository
+          IFS="/" read -ra github_repository <<< "${{ github.repository}}"
+          remote_git="${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PATH}/${github_repository[1]}.git"
+          echo "REMOTE_GIT=$remote_git" >> "$GITHUB_ENV"
+      - name: setup ssh
+        if: env.SSH_OK == 0
+        continue-on-error: true
+        run: |
+          mkdir -p ~/.ssh
+          echo "${SSH_PRIVATE_KEY}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          echo "StrictHostKeyChecking no" >> ~/.ssh/config
+          ssh -o BatchMode=yes -o ConnectTimeout=5 ${REMOTE_USER}@${REMOTE_HOST} pwd
+          if [ $? -ne 0 ]; then
+            echo "ssh test failed($?)."
+          else
+            echo "SSH_OK=1" >> "$GITHUB_ENV"
+          fi
+      - name: checkout
+        if: env.SSH_OK == 1
+        uses: actions/checkout@v4
+      - name: test remote git 
+        if: env.SSH_OK == 1
+        continue-on-error: true
+        run: |
+          git remote add downstream $REMOTE_GIT
+          git ls-remote downstream
+          if [ $? -ne 0 ]; then
+            echo "git ls-remote failed($?)."
+          else
+            echo "REMOTE_GIT_OK=1" >> "$GITHUB_ENV"
+            echo "REMOTE_NEED_PUSH=1" >> "$GITHUB_ENV"
+          fi
+      - name: test remote git is bare
+        if: env.REMOTE_GIT_OK == 1
+        run: |
+          lines=$(git ls-remote -h downstream | wc -l)
+          if [ $lines -ne 0 ]; then
+            echo "REMOTE_GIT_ISBARE=0" >> "$GITHUB_ENV"
+          else
+            echo "REMOTE_GIT_ISBARE=1" >> "$GITHUB_ENV"
+          fi
+      - name: test new to remote 
+        if: env.REMOTE_GIT_OK == 1 && env.REMOTE_GIT_ISBARE == 0
+        run: |
+          log=$(git log -1 --pretty=format:%at%%%H)
+          echo $log
+          git fetch downstream
+          log2=$(git log -1 --pretty=format:%at%%%H downstream/$BRANCH)
+          echo $log2
+          if [[ $log > $log2 ]]; then
+            echo "REMOTE_NEED_PUSH=1" >> "$GITHUB_ENV"
+          else
+            echo "REMOTE_NEED_PUSH=0" >> "$GITHUB_ENV"
+          fi
+      - name: push to remote
+        if: env.REMOTE_NEED_PUSH == 1
+        run: |
+          git fetch --unshallow origin
+          git push downstream $BRANCH
+          echo "push downstream ok!"
+          
+          
